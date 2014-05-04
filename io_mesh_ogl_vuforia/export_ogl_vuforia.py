@@ -23,6 +23,7 @@
 import bpy
 
 import os
+from os.path import basename
 
 ###########################################################
 #
@@ -34,6 +35,7 @@ vtx = []      # list of dictionaries for each mesh
 faces = []    # list of lists
 vl = []       # list of vertices for each mesh
 nl = []       # list of normals for each mesh
+cl = []       # list of vertex colors for each mesh
 uvl =   []    # list of UV coords for each mesh
 obj_mtx=[]  # list of local transformations for each object
 obj_cnt =   0   # object count
@@ -65,7 +67,7 @@ def r2d(v):
 ###########################################################
 
 def clearName(name):
-    tmp=name; #.upper()
+    tmp=os.path.basename(name); #.upper()
     ret=""
     for i in tmp:
         if (i in " ./\-+#$%^!@"):
@@ -88,6 +90,7 @@ def buildData (obj, msh, name):
     global faces         # list of lists
     global vl            # list of vertices for each mesh
     global nl            # list of normals for each mesh
+    global cl            # list of vertex colors for each mesh
     global uvl          # list of UV coords for each mesh
     global obj_mtx      # list of local transformations for each object
 
@@ -95,11 +98,13 @@ def buildData (obj, msh, name):
     lfl = [] # lcoal faces index list
     lvl = [] # local vertex list
     lnl = [] # local normal list
+    lcl = [] # local vertex color list
     luvl = [] # local uv list
     lvcnt = 0 # local vertices count
     isSmooth = False
     hasUV = True    # true by default, it will be verified below
-    
+    hasC = True    # true by default, it will be verified below
+
     print("Building for: %s\n"%obj.name)
 
     if (len(msh.tessface_uv_textures)>0):
@@ -107,59 +112,77 @@ def buildData (obj, msh, name):
             hasUV=False
     else:
         hasUV = False
-     
+
     if (hasUV):
         activeUV = msh.tessface_uv_textures.active.data
-        
+
+    if (len(msh.tessface_vertex_colors)>0):
+        if (msh.tessface_vertex_colors.active is None):
+            hasUV=False
+    else:
+        hasUV = False
+
+    if (hasC):
+        activeC = msh.tessface_vertex_colors.active.data
+
     obj_names.append(clearName(name))
     obj_cnt+=1
-    
+
     for i,f in enumerate(msh.tessfaces):
         isSmooth = f.use_smooth
         tmpfaces = []
-        for j,v in enumerate(f.vertices):  
+        for j,v in enumerate(f.vertices):
             vec = msh.vertices[v].co
             vec = r3d(vec)
-            
+
             if (isSmooth):  # use vertex normal
                 nor = msh.vertices[v].normal
             else:           # use face normal
                 nor = f.normal
-            
+
             nor = r3d(nor)
-            
+
             if (hasUV):
                 co = activeUV[i].uv[j]
                 co = r2d(co)
             else:
                 co = (0.0, 0.0)
-            
+
+            if (hasC):
+                colors = activeC[i].color1, activeC[i].color2, activeC[i].color3, activeC[i].color4
+                color = colors[j]
+                color = r3d(color)
+            else:
+                color = (1.0, 1.0, 1.0)
+
             key = vec, nor, co
             vinx = lvdic.get(key)
-            
+
             if (vinx is None): # vertex not found
                 lvdic[key] = lvcnt
                 lvl.append(vec)
                 lnl.append(nor)
+                lcl.append(color)
                 luvl.append(co)
                 tmpfaces.append(lvcnt)
                 lvcnt+=1
             else:
                 inx = lvdic[key]
                 tmpfaces.append(inx)
-        
-        if (len(tmpfaces)==3): 
+
+        if (len(tmpfaces)==3):
             lfl.append(tmpfaces)
         else:
             lfl.append([tmpfaces[0], tmpfaces[1], tmpfaces[2]])
             lfl.append([tmpfaces[0], tmpfaces[2], tmpfaces[3]])
 
-    
+
     #update global lists and dictionaries
-    vtx.append(lvdic)        
+    vtx.append(lvdic)
     faces.append(lfl)
     vl.append(lvl)
     nl.append(lnl)
+    cl.append(lcl)
     uvl.append(luvl)
     obj_mtx.append(obj.matrix_local)
 
@@ -170,10 +193,11 @@ def buildData (obj, msh, name):
 #       Save data to C header file
 #
 ###########################################################
-    
+
 def save(filename,scale_to=0):
 
-    defName = "_" + clearName( filename ).upper() + "_BLENDER_EXPORT_H_"
+    defPrefix = "_BLENDER_VUFORIA_EXPORT_"
+    defName = defPrefix + "_" + clearName( filename ).upper()
 
     file = open(filename, "w", newline="\n")
     file.write("#ifndef %s\n" % defName )
@@ -182,22 +206,21 @@ def save(filename,scale_to=0):
 
 
     structDefinition = """
+#ifndef """ + defPrefix + """OBJECT_STRUCT_
+#define """ + defPrefix + """OBJECT_STRUCT_
 
-#ifndef _BLENDER_EXPORT_OBJECT_STRUCT_
-#define _BLENDER_EXPORT_OBJECT_STRUCT_
+struct BlenderVuforiaExportObject
+{
+\tunsigned int numVertices;
+\tconst float * vertices;
+\tconst float * normals;
+\tconst float * colors;
+\tconst float * texCoords;
 
-struct BlenderExportedObject{
-    
-    unsigned int numVertices;
-    const float *vertices;
-    const float *normals;
-    const float *texCoords;
-    
-    unsigned int numIndices;
-    const unsigned short *indices;
+\tunsigned int numIndices;
+\tconst unsigned short * indices;
 
-    const float *transform;
-    
+\tconst float * transform;
 };
 
 #endif
@@ -206,10 +229,9 @@ struct BlenderExportedObject{
 
     file.write( structDefinition )
 
-    file.write("#define NUM_OBJECTS %d\n"%obj_cnt)
-
     for index,name in enumerate(obj_names):
 
+        camelPrefix = "_BlenderVuforiaExportObject_"
         camelName = name[0].lower() + name[1:];
         upperName = name.upper();
 
@@ -217,9 +239,10 @@ struct BlenderExportedObject{
         f = faces[ index ];
         uv = uvl[ index ];
         n = nl[ index ];
+        c = cl[ index ];
         o = obj_mtx[ index ];
 
-        numberOfVerticesConstantName = "NUM_" + upperName + "_OBJECT_VERTEX";
+        numberOfVerticesConstantName = defPrefix + "_" + upperName + "_OBJECT_NUM_VERTICES";
 
         file.write( "#define " )
         file.write( numberOfVerticesConstantName )
@@ -229,13 +252,13 @@ struct BlenderExportedObject{
 
 
 
-        numberOfIndicesConstantName = "NUM_" + upperName + "_OBJECT_INDEX";
+        numberOfIndicesConstantName = defPrefix + "_" + upperName + "_OBJECT_NUM_INDICES";
 
         file.write( "#define " )
         file.write( numberOfIndicesConstantName )
-        file.write( " " )
+        file.write( " (" )
         file.write ("%d"%len(f))
-        file.write( " * 3\n" )
+        file.write( " * 3)\n" )
 
         file.write( "\n" )
 
@@ -252,7 +275,7 @@ struct BlenderExportedObject{
                 point = vv[ axisIndex ]
 
                 if( j == 0 ):
-                    
+
                     spans[ axisIndex ] = ( point, point )
 
                 else:
@@ -290,10 +313,11 @@ struct BlenderExportedObject{
             scale = 1
 
 
-        verticesConstantName = camelName + "Vertices"
+        verticesConstantName = camelPrefix + camelName + "Vertices"
 
-        file.write( "static const float " + verticesConstantName + "[ " + numberOfVerticesConstantName + " * 3 ] = {\n\t" )
+        file.write( "static const float " + verticesConstantName + "[ " + numberOfVerticesConstantName + " * 3 ] =\n{\n" )
 
+        newline_cnt = 1
         for j in range(0,len(v)):
 
             vv = v[j]
@@ -306,68 +330,91 @@ struct BlenderExportedObject{
                 #point -= min
                 point *= scale
 
-                file.write ("%ff, "%point)
+                if newline_cnt == 1:
+                    file.write ("\t")
+
+                file.write ("%ff,"%point)
+
+                if newline_cnt == 3:
+                    newline_cnt = 1
+                    file.write ("\n")
+                else:
+                    newline_cnt += 1
+                    file.write (" ")
 
         file.write( "\n};\n" )
         file.write( "\n" )
 
 
-        textureCoordinatesConstantName = camelName + "TexCoords"
+        textureCoordinatesConstantName = camelPrefix + camelName + "TexCoords"
 
-        file.write( "static const float " + textureCoordinatesConstantName + "[ " + numberOfVerticesConstantName + " * 2 ] = {\n\t" )
+        file.write( "static const float " + textureCoordinatesConstantName + "[ " + numberOfVerticesConstantName + " * 2 ] =\n{\n" )
 
         for j in range(0,len(uv)):
 
-            file.write ("%ff, %ff, "%tuple(uv[j]))
+            file.write ("\t%ff, %ff,\n"%tuple(uv[j]))
 
-        file.write( "\n};\n" )
+        file.write( "};\n" )
         file.write( "\n" )
 
 
-        normalsConstantName = camelName + "Normals"
+        normalsConstantName = camelPrefix + camelName + "Normals"
 
-        file.write( "static const float " + normalsConstantName + "[ " + numberOfVerticesConstantName + " * 3 ] = {\n\t" )
+        file.write( "static const float " + normalsConstantName + "[ " + numberOfVerticesConstantName + " * 3 ] =\n{\n" )
 
         for j in range(0,len(n)):
 
-            file.write ("%ff, %ff, %ff, "%tuple(n[j]))
+            file.write ("\t%ff, %ff, %ff,\n"%tuple(n[j]))
 
-        file.write( "\n};\n" )
-        file.write( "\n" )        
+        file.write( "};\n" )
+        file.write( "\n" )
 
 
-        indicesConstantName = camelName + "Indices"
+        colorsConstantName = camelPrefix + camelName + "Colors"
 
-        file.write( "static const unsigned short " + indicesConstantName + "[ " + numberOfIndicesConstantName + " ] = {\n\t" )
+        file.write( "static const float " + colorsConstantName + "[ " + numberOfVerticesConstantName + " * 3 ] =\n{\n" )
+
+        for j in range(0,len(n)):
+
+            file.write ("\t%ff, %ff, %ff,\n"%tuple(c[j]))
+
+        file.write( "};\n" )
+        file.write( "\n" )
+
+
+        indicesConstantName = camelPrefix + camelName + "Indices"
+
+        file.write( "static const unsigned short " + indicesConstantName + "[ " + numberOfIndicesConstantName + " ] =\n{\n" )
 
         for j in range(0,len(f)):
 
-            file.write ("%d, %d, %d, "%tuple(f[j])) 
+            file.write ("\t%d, %d, %d,\n"%tuple(f[j]))
 
-        file.write( "\n};\n" )
-        file.write( "\n" )        
+        file.write( "};\n" )
+        file.write( "\n" )
 
 
-        transformConstantName = camelName + "Transform"
+        transformConstantName = camelPrefix + camelName + "Transform"
 
-        file.write( "static const float " + transformConstantName + "[ 16 ] = {\n" )
+        file.write( "static const float " + transformConstantName + "[ 16 ] =\n{\n" )
 
         file.write("\t%ff, %ff, %ff, %ff,\n"%tuple(o.col[0]))
         file.write("\t%ff, %ff, %ff, %ff,\n"%tuple(o.col[1]))
         file.write("\t%ff, %ff, %ff, %ff,\n"%tuple(o.col[2]))
         file.write("\t%ff, %ff, %ff, %ff,\n"%tuple(o.col[3]))
 
-        file.write( "\n};\n" )
+        file.write( "};\n" )
         file.write( "\n" )
 
 
 
 
-        file.write( "static const BlenderExportedObject %sObject = {\n" % camelName )
+        file.write( "static const BlenderVuforiaExportObject %sObject =\n{\n" % camelName )
 
         file.write( "\t%s,\n" % numberOfVerticesConstantName )
         file.write( "\t%s,\n" % verticesConstantName )
         file.write( "\t%s,\n" % normalsConstantName )
+        file.write( "\t%s,\n" % colorsConstantName )
         file.write( "\t%s,\n" % textureCoordinatesConstantName )
         file.write( "\t%s,\n" % numberOfIndicesConstantName )
         file.write( "\t%s,\n" % indicesConstantName )
@@ -375,8 +422,8 @@ struct BlenderExportedObject{
 
         file.write( "};\n" );
         file.write( "\n" );
-        
-    file.write ("#endif")   
+
+    file.write ("\n#endif\n")
     file.close()
 ###########################################################
 #
@@ -391,6 +438,7 @@ def export(filename="untitled.h", entire_scene=True, scale_to=0 ):
     global faces         # list of lists
     global vl            # list of vertices for each mesh
     global nl            # list of normals for each mesh
+    global cl            # list of vertex colors for each mesh
     global uvl          # list of UV coords for each mesh
     global obj_mtx      # list of local transformations for each object
 
@@ -404,6 +452,7 @@ def export(filename="untitled.h", entire_scene=True, scale_to=0 ):
     faces = []    # list of lists
     vl = []       # list of vertices for each mesh
     nl = []       # list of normals for each mesh
+    cl = []       # list of vertex colors for each mesh
     uvl =   []    # list of UV coords for each mesh
     obj_mtx=[]  # list of local transformations for each object
     obj_cnt =   0   # object count
@@ -425,9 +474,7 @@ def export(filename="untitled.h", entire_scene=True, scale_to=0 ):
         buildData(o, msh, o.name)
         bpy.data.meshes.remove(msh)
 
-    save(filename,scale_to)    
+    save(filename,scale_to)
 
     print("Done\n")
     return {'FINISHED'}
-
-
