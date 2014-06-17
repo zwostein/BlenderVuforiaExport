@@ -122,6 +122,12 @@ def buildData (obj, msh, name):
     else:
         hasUV = False
 
+    if (len(msh.tessface_vertex_colors)>0):
+        if (msh.tessface_vertex_colors.active is None):
+            hasC=False
+    else:
+        hasC = False
+
     if (hasC):
         activeC = msh.tessface_vertex_colors.active.data
 
